@@ -3,16 +3,26 @@
 A task is a world-state delta that should happen.  We scan the world
 state every tick and emit `task.emerged` events for unmet needs, conflicts,
 and opportunities.  Agents then claim and complete them.
+
+Dedup rules (the key fix vs. the broken thin-slice):
+
+  * need-driven tasks are deduplicated by **(agent_id, need)**.  A task
+    remains alive (open OR claimed) until it completes / fails — only then
+    can a new one for the same (agent, need) emerge.  This stops the
+    "every tick = new task for same need" explosion.
+  * gather tasks are deduplicated by **(kind, pos)** with the same
+    open|claimed guard, since the tile is the unit of work.
+  * trade opportunities are deduplicated by **(kind, agent-pair)**.
 """
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .events import Event
-from .world_state import AgentRecord, WorldState, Coord
+from .world_state import AgentRecord, WorldState, Coord, TaskRecord
 
 
 def _new_id(prefix: str) -> str:
@@ -26,6 +36,10 @@ class EmergenceConfig:
     max_open_tasks: int = 12              # never let the queue explode
 
 
+# a task is "live" for dedup purposes if it is open OR claimed.
+_LIVE_STATUSES = ("open", "claimed")
+
+
 class TaskEmergence:
     """Scan world state and emit `task.emerged` events for unmet conditions."""
 
@@ -33,10 +47,9 @@ class TaskEmergence:
         self.config = config or EmergenceConfig()
 
     def scan(self, state: WorldState, tick: int) -> List[Event]:
-        # _scan_needs already applies events to state for accurate dedupe/capacity
         events: List[Event] = []
         events.extend(self._scan_needs(state, tick))
-        if self._open_task_count(state) >= self.config.max_open_tasks:
+        if self._live_task_count(state) >= self.config.max_open_tasks:
             return events
         opps = self._scan_opportunities(state, tick)
         for e in opps:
@@ -50,13 +63,12 @@ class TaskEmergence:
         events: List[Event] = []
         for agent in state.agents.values():
             for need, level in agent.needs.items():
-                # respect capacity per-task
-                if self._open_task_count(state) >= self.config.max_open_tasks:
+                if self._live_task_count(state) >= self.config.max_open_tasks:
                     return events
                 if level < self.config.need_threshold:
                     continue
-                # already a matching open task?
-                if self._has_open(state, f"need:{need}", agent.pos):
+                # dedup by (agent_id, need) — regardless of agent position
+                if self._has_need_task(state, agent.agent_id, need):
                     continue
                 kind = self._need_to_action(need)
                 if kind is None:
@@ -69,11 +81,11 @@ class TaskEmergence:
                         "kind": kind,
                         "pos": list(agent.pos),
                         "need": need,
+                        "agent_id": agent.agent_id,
                         "reward": {"relationship": 0.1},
                     },
                     tick=tick,
                 ))
-                # apply immediately so capacity tracking is accurate
                 state.apply_event(events[-1])
         return events
 
@@ -81,24 +93,19 @@ class TaskEmergence:
 
     def _scan_opportunities(self, state: WorldState, tick: int) -> List[Event]:
         events: List[Event] = []
-        # resource tile + someone with empty inventory near -> gather task
+        # resource tile + nobody on it -> gather task
         for y in range(state.height):
             for x in range(state.width):
+                if self._live_task_count(state) >= self.config.max_open_tasks:
+                    return events
                 tile = state.get_tile((x, y))
                 if tile.resource is None or tile.amount <= 0:
                     continue
-                # is there already a gather task for this tile?
-                if self._has_open(state, "gather", (x, y)):
+                # dedup: a live gather task for this tile already exists?
+                if self._has_gather_task(state, (x, y), tile.resource):
                     continue
-                # is any agent already standing on it?
                 on_tile = [a for a in state.agents.values() if a.pos == (x, y)]
                 if on_tile:
-                    continue
-                # pick nearest agent as the implicit beneficiary
-                nearest = min(state.agents.values(),
-                              key=lambda a: abs(a.pos[0]-x)+abs(a.pos[1]-y),
-                              default=None)
-                if nearest is None:
                     continue
                 events.append(Event(
                     kind="task.emerged",
@@ -116,11 +123,13 @@ class TaskEmergence:
         agents = list(state.agents.values())
         for i, a in enumerate(agents):
             for b in agents[i+1:]:
+                if self._live_task_count(state) >= self.config.max_open_tasks:
+                    return events
                 if self._distance(a.pos, b.pos) > self.config.conflict_distance + 1:
                     continue
                 if not a.inventory or not b.inventory:
                     continue
-                if self._has_open(state, "trade", a.pos):
+                if self._has_trade_task(state, a.agent_id, b.agent_id):
                     continue
                 events.append(Event(
                     kind="task.emerged",
@@ -129,6 +138,8 @@ class TaskEmergence:
                         "title": f"trade between {a.name} and {b.name}",
                         "kind": "trade",
                         "pos": list(a.pos),
+                        "agent_a": a.agent_id,
+                        "agent_b": b.agent_id,
                         "reward": {"relationship": 0.2},
                     },
                     tick=tick,
@@ -138,12 +149,37 @@ class TaskEmergence:
 
     # ----------------------------------------------------------------- utils
 
-    def _open_task_count(self, state: WorldState) -> int:
-        return sum(1 for t in state.tasks.values() if t.status == "open")
+    def _live_task_count(self, state: WorldState) -> int:
+        return sum(1 for t in state.tasks.values() if t.status in _LIVE_STATUSES)
 
-    def _has_open(self, state: WorldState, kind: str, pos: Coord) -> bool:
-        return any(t.kind == kind and t.status == "open" and t.pos == pos
-                   for t in state.tasks.values())
+    def _has_need_task(self, state: WorldState, agent_id: str, need: str) -> bool:
+        for t in state.tasks.values():
+            if t.status not in _LIVE_STATUSES:
+                continue
+            if t.payload.get("need") == need and t.payload.get("agent_id") == agent_id:
+                return True
+        return False
+
+    def _has_gather_task(self, state: WorldState, pos: Coord, resource: str) -> bool:
+        for t in state.tasks.values():
+            if t.status not in _LIVE_STATUSES:
+                continue
+            if t.kind != "gather":
+                continue
+            if t.pos == pos:
+                return True
+        return False
+
+    def _has_trade_task(self, state: WorldState, a_id: str, b_id: str) -> bool:
+        for t in state.tasks.values():
+            if t.status not in _LIVE_STATUSES:
+                continue
+            if t.kind != "trade":
+                continue
+            pair = {t.payload.get("agent_a"), t.payload.get("agent_b")}
+            if pair == {a_id, b_id}:
+                return True
+        return False
 
     @staticmethod
     def _distance(a: Coord, b: Coord) -> int:

@@ -43,7 +43,12 @@ def main(argv: List[str] | None = None) -> int:
             agent.policy.rng_seed = args.seed  # type: ignore[attr-defined]
 
     events = sim.run(args.ticks)
-    kinds = sim.event_kinds()
+    # Count from the *returned* event stream so that `intent.rejected`
+    # audit records (which never mutate state and therefore aren't in
+    # `event_log`) are included alongside the applied facts.
+    kinds: dict = {}
+    for e in events:
+        kinds[e.kind] = kinds.get(e.kind, 0) + 1
 
     emergence_signals = {
         "task.emerged": kinds.get("task.emerged", 0),
@@ -64,6 +69,11 @@ def main(argv: List[str] | None = None) -> int:
         "completed_tasks": sum(1 for t in sim.state.tasks.values() if t.status == "done"),
     }
 
+    # Conservation check: total_items = sum of agent inventories + tile amounts.
+    # Trades, gathers, consumes should conserve the grand total.
+    total_items = sim.state.total_agent_items() + sim.state.total_resource_mass()
+    summary["total_items_in_world"] = total_items
+
     print(f"== openworld headless run ==")
     print(f"ticks         : {summary['ticks']}")
     print(f"total events  : {summary['total_events']}")
@@ -76,6 +86,8 @@ def main(argv: List[str] | None = None) -> int:
         print(f"  {k:<22s} {v}")
     print(f"open tasks    : {summary['open_tasks']}")
     print(f"completed     : {summary['completed_tasks']}")
+    print(f"total items in world : {total_items}  "
+          f"(agents={sim.state.total_agent_items()} + tiles={sim.state.total_resource_mass()})")
 
     if args.show_recent > 0:
         print()

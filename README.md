@@ -98,20 +98,24 @@ openworld-sim/
 └── README.md
 ```
 
-## 涌现事件示例（启发式策略，200 tick）
+## 涌现事件示例（启发式策略，100 tick，确定性 seed=42）
 
 ```
-task.emerged           715    # 任务从状态涌现
-task.claimed           641    # Agent 主动认领
-agent.moved            361    # 移动
-agent.spoke            128    # 社交对话
-trade.completed         12    # 物品交换（合作）
-agent.gathered           6    # 资源采集
-agent.consumed           8    # 消费（need 下降）
+task.emerged            33    # 任务从状态涌现（按 agent+need 去重，不再每 tick 重复）
+task.claimed            25    # Agent 主动认领
+task.completed          21    # 任务真正完成
+agent.moved            396    # 目标导向移动（Manhattan 贪心）
+agent.gathered          28    # 资源采集（带目标导航）
+agent.consumed          12    # 消费（need 下降）
+trade.completed          5    # 物品交换（合作）
+agent.spoke             44    # 社交对话
+intent.rejected          7    # 非法 Intent 被拒（OOB / occupied）
+conflict.broke           2    # 多 Agent 同 cell 冲突
 ```
 
-LLM 启用后会显著提升 agent.spoke 与 trade.completed 数量
-（见 [docs/09-research-plan.md](docs/09-research-plan.md) 实验 2）。
+数字与 [docs/RESULTS.md](docs/RESULTS.md) 一致，由 `make headless`
+真实跑批得到（确定性）。LLM 启用后会显著提升 agent.spoke 与
+trade.completed 数量（见 [docs/09-research-plan.md](docs/09-research-plan.md) 实验 2）。
 
 ## 许可
 

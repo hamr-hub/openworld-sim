@@ -16,33 +16,55 @@ class Agent:
     name: str
     persona: str = ""
     policy: Optional[Policy] = None
+    # Per-agent starting inventory.  Each demo agent is intentionally
+    # seeded with a *different* mix so that bilateral trade is possible
+    # from the start (no point having a market when everyone carries the
+    # same items).
+    starting_inventory: Optional[Dict[str, int]] = None
 
     def make_record(self) -> AgentRecord:
+        inv = self.starting_inventory if self.starting_inventory is not None else {
+            "food": 2, "wood": 2, "ore": 0, "water": 2,
+        }
         return AgentRecord(
             agent_id=self.agent_id,
             name=self.name,
             pos=(0, 0),
             needs={"hunger": 0.3, "social": 0.2, "energy": 0.2},
             goals=["survive", "socialise"],
-            inventory={"food": 2, "wood": 2, "ore": 0, "water": 2},
+            inventory=dict(inv),
         )
 
 
 def default_agents() -> Dict[str, Agent]:
-    """The thin-slice demo ships 4 agents with distinct personas."""
+    """The thin-slice demo ships 4 agents with distinct personas AND
+    distinct starting inventories, so the trade loop has something to
+    work with from tick 1."""
     return {
-        "alice": Agent(agent_id="alice", name="Alice",
-                       persona="gatherer, friendly",
-                       policy=HeuristicPolicy(rng_seed=11)),
-        "bob": Agent(agent_id="bob", name="Bob",
-                     persona="trader, cautious",
-                     policy=HeuristicPolicy(rng_seed=23)),
-        "carol": Agent(agent_id="carol", name="Carol",
-                       persona="explorer, curious",
-                       policy=HeuristicPolicy(rng_seed=37)),
-        "dave": Agent(agent_id="dave", name="Dave",
-                      persona="craftsman, grumpy",
-                      policy=HeuristicPolicy(rng_seed=53)),
+        "alice": Agent(
+            agent_id="alice", name="Alice",
+            persona="gatherer, friendly",
+            policy=HeuristicPolicy(rng_seed=11),
+            starting_inventory={"food": 3, "wood": 1, "ore": 0, "water": 2},
+        ),
+        "bob": Agent(
+            agent_id="bob", name="Bob",
+            persona="trader, cautious",
+            policy=HeuristicPolicy(rng_seed=23),
+            starting_inventory={"food": 1, "wood": 3, "ore": 0, "water": 1},
+        ),
+        "carol": Agent(
+            agent_id="carol", name="Carol",
+            persona="explorer, curious",
+            policy=HeuristicPolicy(rng_seed=37),
+            starting_inventory={"food": 0, "wood": 1, "ore": 2, "water": 1},
+        ),
+        "dave": Agent(
+            agent_id="dave", name="Dave",
+            persona="craftsman, grumpy",
+            policy=HeuristicPolicy(rng_seed=53),
+            starting_inventory={"food": 1, "wood": 0, "ore": 1, "water": 1},
+        ),
     }
 
 

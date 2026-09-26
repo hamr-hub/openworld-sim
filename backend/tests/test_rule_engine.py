@@ -8,18 +8,21 @@ from openworld.world_state import WorldState
 
 
 def _setup():
-    ws = WorldState(width=4, height=4)
-    ws.apply_event(Event(kind="world.init", payload={"width": 4, "height": 4}, tick=0))
+    """5x5 world with Alice and Bob adjacent (Manhattan = 1).  The trade
+    rule requires adjacency, so the test fixture puts them next to each
+    other from the start."""
+    ws = WorldState(width=5, height=5)
+    ws.apply_event(Event(kind="world.init", payload={"width": 5, "height": 5}, tick=0))
     ws.apply_event(Event(kind="agent.register",
                           payload={"agent_id": "alice", "name": "Alice",
-                                   "pos": [0, 0], "inventory": {"food": 2, "wood": 0}},
+                                   "pos": [2, 2], "inventory": {"food": 2, "wood": 0}},
                           tick=0))
     ws.apply_event(Event(kind="agent.register",
                           payload={"agent_id": "bob", "name": "Bob",
-                                   "pos": [3, 3], "inventory": {"food": 0, "wood": 2}},
+                                   "pos": [3, 2], "inventory": {"food": 0, "wood": 2}},
                           tick=0))
     ws.apply_event(Event(kind="world.tile",
-                          payload={"pos": [0, 0], "kind": "ground",
+                          payload={"pos": [2, 2], "kind": "ground",
                                    "resource": "wood", "amount": 5}, tick=0))
     return ws
 
@@ -57,8 +60,8 @@ def test_gather_consumes_tile_resource():
                                         payload={"qty": 2}, tick=1)], tick=1)
     kinds = [e.kind for e in outcome.accepted]
     assert "agent.gathered" in kinds
-    # tile depleted by 2
-    assert ws.get_tile((0, 0)).amount == 3
+    # tile depleted by 2 (wood resource is on Alice's tile at (2,2))
+    assert ws.get_tile((2, 2)).amount == 3
     assert ws.agents["alice"].inventory["wood"] == 2
 
 

@@ -24,7 +24,7 @@ Coord = Tuple[int, int]
 @dataclass
 class Tile:
     kind: str = "ground"          # ground | water | wall | resource
-    resource: Optional[str] = None  # e.g. "wood", "ore"
+    resource: Optional[str] = None  # e.g. "wood", "ore", "food", "water"
     amount: int = 0
 
 
@@ -48,7 +48,11 @@ class TaskRecord:
     pos: Coord
     status: str = "open"       # open | claimed | done | failed
     claimed_by: Optional[str] = None
+    completed_by: Optional[str] = None
     reward: Dict[str, Any] = field(default_factory=dict)
+    # Original `task.emerged` payload — kept so RuleEngine/heuristic can inspect
+    # `need` / `agent_id` / `resource` etc. without grepping the event log.
+    payload: Dict[str, Any] = field(default_factory=dict)
 
 
 class WorldState:
@@ -155,9 +159,16 @@ class WorldState:
                 self.agents[a].relationships[b] = self.agents[a].relationships.get(b, 0.0) + 0.2
                 self.agents[b].relationships[a] = self.agents[b].relationships.get(a, 0.0) + 0.2
         elif kind == "task.emerged":
+            # Store the full payload (sans structural keys) so subsequent
+            # heuristics / rule checks can read e.g. `need`, `agent_id`.
+            stored_payload = {
+                k: v for k, v in p.items()
+                if k not in ("task_id", "title", "kind", "pos", "reward")
+            }
             self.tasks[p["task_id"]] = TaskRecord(
                 task_id=p["task_id"], title=p["title"], kind=p["kind"],
                 pos=tuple(p["pos"]), reward=dict(p.get("reward", {})),
+                payload=stored_payload,
             )
         elif kind == "task.claimed":
             if p["task_id"] in self.tasks:
@@ -166,6 +177,15 @@ class WorldState:
         elif kind == "task.completed":
             if p["task_id"] in self.tasks:
                 self.tasks[p["task_id"]].status = "done"
+                self.tasks[p["task_id"]].completed_by = p.get("completed_by")
+                # social bump for the resolver
+                resolver = p.get("completed_by")
+                if resolver and resolver in self.agents:
+                    self.agents[resolver].relationships[resolver] = \
+                        self.agents[resolver].relationships.get(resolver, 0.0) + 0.05
+        elif kind == "task.failed":
+            if p["task_id"] in self.tasks:
+                self.tasks[p["task_id"]].status = "failed"
         elif kind == "conflict.broke":
             a, b = p["a"], p["b"]
             if a in self.agents and b in self.agents:
@@ -205,11 +225,20 @@ class WorldState:
                     "pos": t.pos,
                     "status": t.status,
                     "claimed_by": t.claimed_by,
+                    "completed_by": t.completed_by,
                 }
                 for t in self.tasks.values()
             ],
             "event_count": len(self.event_log),
         }
+
+    def total_resource_mass(self) -> int:
+        """Sum of all resource amounts currently on the map (for conservation checks)."""
+        return sum(t.amount for row in self.grid for t in row)
+
+    def total_agent_items(self) -> int:
+        """Sum of all items held by all agents (for conservation checks)."""
+        return sum(sum(a.inventory.values()) for a in self.agents.values())
 
     @classmethod
     def replay(cls, events: List[Event], width: int = 12, height: int = 12) -> "WorldState":

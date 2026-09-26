@@ -30,6 +30,13 @@ class RuleOutcome:
     rejected: List[Event]
 
 
+# Threshold under which a "need" is considered resolved (post-consume).
+# Kept in sync with `_NEED_RESOLVED` in policies.py — both must agree
+# on what "resolved enough to complete" means, or the heuristic will
+# emit `complete` intents that the rule engine then rejects.
+_NEED_RESOLVED_BELOW = 0.4
+
+
 class RuleEngine:
     """Pure function over (state, intent-list) -> (events, new-events-list)."""
 
@@ -96,6 +103,7 @@ class RuleEngine:
             "consume": self._rule_consume,
             "trade": self._rule_trade,
             "claim": self._rule_claim,
+            "complete": self._rule_complete,
         }.get(a)
         if handler is None:
             return self._reject(intent, tick, f"unknown action {a}")
@@ -197,10 +205,14 @@ class RuleEngine:
         if not other_id or other_id not in state.agents:
             raise _RuleReject("no counterparty")
         other = state.agents[other_id]
+        # adjacency is part of the world physics — must be co-located (incl. same cell)
+        if abs(other.pos[0] - agent.pos[0]) + abs(other.pos[1] - agent.pos[1]) > 1:
+            raise _RuleReject("not adjacent to counterparty")
         give = dict(intent.payload.get("give", {}))
         recv = dict(intent.payload.get("recv", {}))
         if not give or not recv:
             raise _RuleReject("empty trade")
+        # conservation: both sides must hold what they "give up"
         for r, q in give.items():
             if agent.inventory.get(r, 0) < q:
                 raise _RuleReject(f"missing {r} for trade")
@@ -224,6 +236,33 @@ class RuleEngine:
         return [Event(
             kind="task.claimed",
             payload={"task_id": tid, "agent_id": agent.agent_id},
+            tick=tick,
+            caused_by=intent.intent_id,
+        )]
+
+    def _rule_complete(self, state: WorldState, agent: AgentRecord, intent: Intent, tick: int) -> List[Event]:
+        tid = intent.payload.get("task_id")
+        t = state.tasks.get(tid) if tid else None
+        if t is None:
+            raise _RuleReject("no such task")
+        if t.status != "claimed":
+            raise _RuleReject(f"task is {t.status}, not claimed")
+        if t.claimed_by != agent.agent_id:
+            raise _RuleReject("not the claimer")
+        # per-kind completion gate
+        need = t.payload.get("need") if isinstance(t.payload, dict) else None
+        if need is not None:
+            # need task — agent's need must be below resolution threshold
+            if agent.needs.get(need, 0.0) >= _NEED_RESOLVED_BELOW:
+                raise _RuleReject(f"need '{need}' not yet resolved")
+        elif t.kind == "gather":
+            # gather task — agent must be standing on the resource tile
+            if tuple(t.pos) != agent.pos:
+                raise _RuleReject("not at gather site")
+        return [Event(
+            kind="task.completed",
+            payload={"task_id": tid, "completed_by": agent.agent_id,
+                     "kind": t.kind, "need": need},
             tick=tick,
             caused_by=intent.intent_id,
         )]

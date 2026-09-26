@@ -15,6 +15,7 @@ else is pure functions over (state, intent) -> events.
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -33,8 +34,13 @@ log = logging.getLogger(__name__)
 class SimulationConfig:
     width: int = 12
     height: int = 12
-    spawn_positions = ((1, 1), (1, 10), (10, 1), (10, 10))
+    # Corners — keeps agents close to the boundary so that the heuristic's
+    # random-walk "explore" branch produces a realistic mix of accepted
+    # moves and out-of-bounds rejections in the default headless run.
+    spawn_positions = ((0, 0), (0, 11), (11, 0), (11, 11))
     needs_decay_per_tick: float = 0.02  # small decay -> drives emergence
+    resource_regen_rate: float = 0.05  # chance per tick per depleted tile to refill +1
+    resource_max: int = 6             # cap on tile amount
 
 
 class Simulator:
@@ -46,6 +52,7 @@ class Simulator:
         agents: Optional[Dict[str, Agent]] = None,
         rule_engine: Optional[RuleEngine] = None,
         task_emergence: Optional[TaskEmergence] = None,
+        seed: Optional[int] = 42,
     ) -> None:
         self.config = config or SimulationConfig()
         self.clock = Clock()
@@ -54,6 +61,7 @@ class Simulator:
         self.engine = rule_engine or RuleEngine()
         self.emergence = task_emergence or TaskEmergence(EmergenceConfig())
         self.bus = EventBus()
+        self._rng = random.Random(seed)
         self._bootstrap()
 
     # ---------------------------------------------------------------- bootstrap
@@ -104,13 +112,20 @@ class Simulator:
         new_events.extend(outcome.accepted)
         new_events.extend(outcome.rejected)
 
-        # 4) task emergence (also produces events)
+        # 4) resource regeneration — empty tiles slowly replenish so the
+        #    world doesn't grind to a halt after the bootstrap supply is
+        #    exhausted.  These are world events too (event sourcing!).
+        for e in self._regenerate_resources(tick):
+            new_events.append(e)
+            self.state.apply_event(e)
+
+        # 5) task emergence (also produces events)
         emergent = self.emergence.scan(self.state, tick)
         new_events.extend(emergent)
         for e in emergent:
             self.state.apply_event(e)
 
-        # 5) fan out
+        # 6) fan out
         if new_events:
             self.bus.publish(new_events)
         return new_events
@@ -124,6 +139,25 @@ class Simulator:
             for need in ("hunger", "social"):
                 if need in agent.needs:
                     agent.needs[need] = min(1.0, agent.needs[need] + decay)
+
+    def _regenerate_resources(self, tick: int) -> List[Event]:
+        """Slowly refill depleted tiles.  Tiny drip — keeps the world
+        from going static without flooding it."""
+        events: List[Event] = []
+        for y in range(self.state.height):
+            for x in range(self.state.width):
+                tile = self.state.get_tile((x, y))
+                if tile.resource and 0 < tile.amount < self.config.resource_max:
+                    # refill at ~regen_rate/tick when partially depleted
+                    if self._rng.random() < self.config.resource_regen_rate:
+                        new_amount = min(self.config.resource_max, tile.amount + 1)
+                        events.append(Event(
+                            kind="world.tile",
+                            payload={"pos": [x, y], "kind": tile.kind,
+                                     "resource": tile.resource, "amount": new_amount},
+                            tick=tick,
+                        ))
+        return events
 
     def _gather_intents(self, tick: int) -> List[Intent]:
         intents: List[Intent] = []
