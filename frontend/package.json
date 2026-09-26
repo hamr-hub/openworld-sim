@@ -1,0 +1,17 @@
+{
+  "name": "openworld-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Minimal Vite + TS canvas sandbox for OpenWorld Sim.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 5173",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "vite": "^5.4.10"
+  }
+}
